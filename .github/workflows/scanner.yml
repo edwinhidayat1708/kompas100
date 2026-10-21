@@ -1,4 +1,4 @@
-name: Daily Swing Scanner
+name: kompas100
 
 on:
   schedule:
