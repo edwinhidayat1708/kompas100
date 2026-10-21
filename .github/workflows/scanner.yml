@@ -1,4 +1,4 @@
-name: kompas100
+name: Daily Swing Scanner
 
 on:
   schedule:
@@ -9,7 +9,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
+    
     permissions:
       contents: write # Memberikan izin agar GitHub Actions bisa push file log CSV
 
@@ -37,7 +37,7 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-
+          
           if [ -f log_rekomendasi_swing_v3.csv ]; then
             git add log_rekomendasi_swing_v3.csv
             git commit -m "Update log harian rekomendasi swing [skip ci]" || echo "No changes to commit"
