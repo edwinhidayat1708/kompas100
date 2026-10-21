@@ -2,8 +2,8 @@ name: Daily Swing Scanner
 
 on:
   schedule:
-    # Berjalan otomatis setiap Senin-Jumat jam 17:00 WIB (10:00 UTC)
-    - cron: '0 10 * * 1-5'
+    # Berjalan otomatis setiap Senin-Jumat jam 18:00 WIB (11:00 UTC)
+    - cron: '0 11 * * 1-5'
   workflow_dispatch: # Memungkinkan tombol 'Run workflow' manual di tab Actions
 
 jobs:
@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     
     permissions:
-      contents: write # Memberikan izin agar GitHub Actions bisa push file log CSV
+      contents: write
 
     steps:
       - name: Checkout code
