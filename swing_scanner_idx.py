@@ -75,7 +75,7 @@ def send_telegram_message(message):
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         print("[!] Token atau Chat ID Telegram tidak ditemukan di Environment.")
-        return
+        return False
     
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
@@ -83,15 +83,24 @@ def send_telegram_message(message):
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             print("[+] Notifikasi Telegram berhasil terkirim.")
+            return True
         else:
             print(f"[!] Gagal kirim Telegram: {response.text}")
+            return False
     except Exception as e:
         print(f"[!] Error koneksi Telegram: {e}")
+        return False
 
 # ==========================================
-# 4. MAIN SCANNER ENGINE
+# 4. MAIN SCANNER ENGINE & TEST CONNECTION
 # ==========================================
 def run_scanner():
+    # TEST KONEKSI AWAL: Memastikan Telegram terhubung sebelum proses berat
+    print("[*] Menguji koneksi bot Telegram...")
+    test_sent = send_telegram_message("🤖 *TEST KONEKSI BERHASIL!*\nSkrip Daily Swing Scanner terhubung sempurna ke Telegram.")
+    if not test_sent:
+        print("[!] Peringatan: Tes pesan Telegram gagal dikirim. Periksa kembali TOKEN dan CHAT_ID Anda.")
+
     tickers = get_kompas100_tickers()
     rekomendasi_list = []
     
@@ -99,6 +108,7 @@ def run_scanner():
 
     for ticker in tickers:
         try:
+            # Ambil data Yahoo Finance
             df = yf.download(ticker, period="2 yr", interval="1d", progress=False)
             if df.empty or len(df) < 250:
                 continue
@@ -113,7 +123,7 @@ def run_scanner():
             current_ma200 = df['MA200'].iloc[-1]
             
             if pd.isna(current_ma200) or current_close <= current_ma200:
-                continue  # Filter Wajib: Harga harus di atas MA 200
+                continue  # Filter Wajib: Harga di atas MA 200
 
             features = ['Return_1d', 'Return_5d', 'ATR_Pct', 'Vol_Ratio']
             model_df = df.dropna(subset=features + ['Target_Success'])
@@ -153,7 +163,6 @@ def run_scanner():
         df_log = df_log.sort_values(by='Probability_%', ascending=False)
         df_log.to_csv("log_rekomendasi_swing_v3.csv", index=False)
         
-        # Format Pesan Telegram
         msg = "🚨 *DAILY SWING SCANNER (KOMPAS100)* 🚨\n"
         msg += "Model ML mendeteksi peluang profit $\\ge 7\\%$ dalam 5 hari:\n\n"
         for idx, row in df_log.iterrows():
@@ -166,7 +175,9 @@ def run_scanner():
         send_telegram_message(msg)
         print(f"[+] Ditemukan {len(df_log)} sinyal valid & terkirim ke Telegram.")
     else:
-        print("[-] Tidak ada sinyal yang memenuhi kriteria hari ini.")
+        print("[-] Selesai. Tidak ada emiten yang lolos kriteria probabilitas tinggi hari ini.")
+        # Mengirim info bahwa scan berjalan tapi nihil sinyal (opsional)
+        send_telegram_message("ℹ️ *Daily Swing Scanner*:\nScan selesai pada KOMPAS100. Tidak ada emiten yang memenuhi kriteria probabilitas $\\ge 65\\%$ hari ini.")
         if os.path.exists("log_rekomendasi_swing_v3.csv"):
             os.remove("log_rekomendasi_swing_v3.csv")
 
