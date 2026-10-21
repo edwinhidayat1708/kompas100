@@ -1,0 +1,47 @@
+name: Daily Swing Scanner
+
+on:
+  schedule:
+    # Berjalan otomatis setiap Senin-Jumat jam 17:00 WIB (10:00 UTC)
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch: # Memungkinkan tombol 'Run workflow' manual di tab Actions
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write # Memberikan izin agar GitHub Actions bisa push file log CSV
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy yfinance xgboost scikit-learn requests
+
+      - name: Run Scanner
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python swing_scanner_idx.py
+
+      - name: Commit & Push Log changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+
+          if [ -f log_rekomendasi_swing_v3.csv ]; then
+            git add log_rekomendasi_swing_v3.csv
+            git commit -m "Update log harian rekomendasi swing [skip ci]" || echo "No changes to commit"
+            git push
+          else
+            echo "File log tidak ditemukan atau tidak ada sinyal baru hari ini."
+          fi
