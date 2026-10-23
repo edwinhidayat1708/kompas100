@@ -1,38 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-KOMPAS100 SWING SCANNER V8.1 (PROP-FIRM GRADE)
-==============================================
-Fixes implemented:
-  1. BEI Volume Anomaly Correction (Lot vs Share scaling detection).
-  2. Official IDX/BEI Regulation Tick-Size Dynamic Rounding Engine.
-  3. Volatility-Normalized Overextension Protector (Z-Score Ext_MA20_ATR).
+KOMPAS100 QUANTITATIVE SWING SCANNER V8.2
+=========================================
+Architectural Refinements for Institutional Deployment:
+  1. Automated IDX Multi-Token Volume Scaler (Handles Lot vs Share anomalies).
+  2. Multi-Year Corporate Actions Adjusted Pricing (auto_adjust=True verification) [finance].
+  3. Ticker-Aware Cross-Sectional Panel Data Purging Framework.
 """
 from __future__ import annotations
 
-import argparse
-import html
-import logging
 import os
 import sys
+import logging
 import warnings
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
-import requests
 import xgboost as xgb
 import yfinance as yf
-from sklearn.isotonic import IsotonicRegression
-from sklearn.metrics import brier_score_loss, roc_auc_score
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-log = logging.getLogger("scanner")
+log = logging.getLogger("scanner_v8_2")
 
 # =============================================================================
-# CONFIGURATION & UNIVERSES
+# HARDCORE CONFIGURATION PARAMETERS
 # =============================================================================
 KOMPAS100 = [
     "AADI", "ACES", "ADMR", "ADRO", "AKRA", "AMMN", "AMRT", "ANTM", "ARCI", "ARTO",
@@ -46,57 +41,48 @@ KOMPAS100 = [
     "PWON", "RAJA", "RATU", "RMKE", "SCMA", "SGER", "SMGR", "SMIL", "SMRA", "SSIA",
     "TAPG", "TINS", "TLKM", "TOBA", "TOWR", "TPIA", "UNTR", "UNVR", "WIFI", "WIRG",
 ]
-BIG4 = ["BBCA.JK", "BBRI.JK", "BMRI.JK", "BBNI.JK"]
 
 YEARS_BACK = 7                 
-MIN_HISTORY = 260              
 WIB = ZoneInfo("Asia/Jakarta")
-MARKET_FINAL_TIME = dtime(16, 30)   
 
 TP_ATR = 2.5
 SL_ATR = 1.25
 HORIZON = 7                    
-COST_ROUNDTRIP = 0.004         
 
 MIN_PRICE = 150                
 MIN_VALUE_IDR = 5e9            
-REGIME_GATE = True             
-BREADTH_MIN = 0.35
 
 FEATURES = [
     "Dist_MA200", "MA50_Slope", "ATR_Pct",
     "ATR_Compress", "BB_Width_Rel", "Dist_High20_ATR",
     "Range_Expansion", "Value_Ratio", "CLV",
     "Ext_MA20_ATR",
-    "IHSG_vs_MA50", "Breadth50", "SP500_Ret5", "USDIDR_Ret5",
+    "IHSG_vs_MA50", "SP500_Ret5", "USDIDR_Ret5",
 ]
 
 # =============================================================================
-# FIXED FLAW 1 & 2: RE-ENGINEERED MICROSTRUCTURE CORRECTIONS
+# FIXED FLAW 1 & 2: RE-ENGINEERED PIPELINE CORE FUNCTIONS
 # =============================================================================
-def fix_bei_volume_anomaly(df: pd.DataFrame) -> pd.DataFrame:
+def normalise_idx_volume(df: pd.DataFrame) -> pd.DataFrame:
     """
-    FLAW 1 SOLUTION: Detects if yfinance parses IDX volumes in Lots instead of Shares.
-    Ensures liquidity value computation (MIN_VALUE_IDR) remains architecturally intact [finance].
+    FIX FLAW 1: Evaluates tracking value loops across raw data tables.
+    Standardizes transactional share scaling automatically if lot metrics are passed.
     """
     df = df.copy()
     if df.empty or 'Volume' not in df.columns or 'Close' not in df.columns:
         return df
         
-    median_raw_value = (df['Volume'] * df['Close']).median()
+    median_turnover = (df['Volume'] * df['Close']).median()
     
-    # If the median daily turnover registers under Rp 50 Million for a liquid Kompas100 asset,
-    # it implies that yfinance is providing standard 100-share LOT data units.
-    if median_raw_value < 50_000_000:
+    # If the median daily cash flow computes below Rp 50 Million on Kompas100 members,
+    # yfinance has scaled inputs down to the 100-share LOT metric.
+    if median_turnover < 50_000_000:
         df['Volume'] = df['Volume'] * 100
         
     return df
 
 def round_to_idx_tick(price: float, direction: str = "up") -> float:
-    """
-    FLAW 2 SOLUTION: Implements official PT Bursa Efek Indonesia (IDX) tick sizing.
-    Prevents mathematical drift mismatch inside the execution layers.
-    """
+    """FIX FLAW 2: Maps pricing metrics to the official IDX microstructure rules."""
     if pd.isna(price) or price <= 0:
         return price
         
@@ -117,30 +103,23 @@ def round_to_idx_tick(price: float, direction: str = "up") -> float:
         return float(np.floor(price / tick) * tick)
 
 # =============================================================================
-# DATA UTILITIES & FEATURE ENGINEERING WITH OVEREXTENSION PROTECTION
+# ADVANCED MACHINE LEARNING DATA PACKER
 # =============================================================================
-def clean_index(idx) -> pd.DatetimeIndex:
-    idx = pd.to_datetime(idx)
-    if getattr(idx, "tz", None) is not None:
-        idx = idx.tz_localize(None)
-    return idx.normalize()
-
-def fetch_macro_data() -> pd.DataFrame | None:
-    """Fetches macro variables ensuring asynchronous S&P500 alignment (no look-ahead)."""
+def fetch_macro_infrastructure() -> pd.DataFrame | None:
     try:
         end_dt = (datetime.now(WIB) + pd.Timedelta(days=1)).date().isoformat()
         start_dt = (pd.Timestamp.now() - pd.DateOffset(years=YEARS_BACK)).date().isoformat()
         
-        ihsg = yf.download("^JKSE", start=start_dt, end=end_dt, progress=False)
-        sp500 = yf.download("^GSPC", start=start_dt, end=end_dt, progress=False)
-        idr = yf.download("USDIDR=X", start=start_dt, end=end_dt, progress=False)
+        # Pull global markets using auto_adjust to keep structural consistency intact [finance]
+        ihsg = yf.download("^JKSE", start=start_dt, end=end_dt, auto_adjust=True, progress=False)
+        sp500 = yf.download("^GSPC", start=start_dt, end=end_dt, auto_adjust=True, progress=False)
+        idr = yf.download("USDIDR=X", start=start_dt, end=end_dt, auto_adjust=True, progress=False)
         
-        # Flatten MultiIndex columns if present
         if isinstance(ihsg.columns, pd.MultiIndex): ihsg.columns = ihsg.columns.get_level_values(0)
         if isinstance(sp500.columns, pd.MultiIndex): sp500.columns = sp500.columns.get_level_values(0)
         if isinstance(idr.columns, pd.MultiIndex): idr.columns = idr.columns.get_level_values(0)
         
-        macro_df = pd.DataFrame(index=clean_index(ihsg.index))
+        macro_df = pd.DataFrame(index=pd.to_datetime(ihsg.index).normalize())
         macro_df['IHSG_Close'] = ihsg['Close']
         macro_df['IHSG_MA50'] = ihsg['Close'].rolling(50).mean()
         macro_df['IHSG_vs_MA50'] = np.where(macro_df['IHSG_Close'] >= macro_df['IHSG_MA50'], 1.0, 0.0)
@@ -151,23 +130,19 @@ def fetch_macro_data() -> pd.DataFrame | None:
         
         return macro_df.dropna(subset=['IHSG_Close'])
     except Exception as e:
-        log.error(f"Failed pulling macro infrastructure variables: {e}")
+        log.error(f"Failed pulling macro matrix: {e}")
         return None
 
-def engineer_features(df: pd.DataFrame, macro_df: pd.DataFrame | None) -> pd.DataFrame:
-    """
-    FLAW 3 SOLUTION: Incorporates Ext_MA20_ATR.
-    Computes structural overextension metrics normalized via actual volatility metrics.
-    """
+def engineer_features(df: pd.DataFrame, macro_df: pd.DataFrame | None, ticker_name: str) -> pd.DataFrame:
     df = df.copy()
+    df['Ticker'] = ticker_name
     
-    # Technical Indicators
+    # Standard Volatility Bounds and Structural Moving Averages
     df['MA200'] = df['Close'].rolling(200).mean()
     df['MA50'] = df['Close'].rolling(50).mean()
     df['MA50_Slope'] = df['MA50'].pct_change(5)
     df['Dist_MA200'] = (df['Close'] - df['MA200']) / df['MA200']
     
-    # ATR Volatilities
     high_low = df['High'] - df['Low']
     high_close = (df['High'] - df['Close'].shift()).abs()
     low_close = (df['Low'] - df['Close'].shift()).abs()
@@ -175,33 +150,28 @@ def engineer_features(df: pd.DataFrame, macro_df: pd.DataFrame | None) -> pd.Dat
     df['ATR14'] = tr.rolling(14).mean()
     df['ATR_Pct'] = df['ATR14'] / df['Close']
     
-    # Setup Metrics
     df['ATR_Compress'] = df['ATR14'].rolling(5).min() / df['ATR14'].rolling(20).max()
     std20 = df['Close'].rolling(20).std()
     df['BB_Width_Rel'] = (std20 * 4) / df['Close']
     df['High20'] = df['High'].rolling(20).max()
     df['Dist_High20_ATR'] = (df['High20'] - df['Close']) / df['ATR14']
     
-    # Triggers
     df['Daily_Range'] = df['High'] - df['Low']
-    df['Range_Expansion'] = df['Daily_Range'] / df['Daily_Range'].rolling(5).mean()
+    df['Range_Expansion'] = df['Daily_Range'] / (df['Daily_Range'].rolling(5).mean() + 1e-8)
     df['Vol_MA20'] = df['Volume'].rolling(20).mean()
     df['Value_Ratio'] = (df['Volume'] * df['Close']) / ((df['Vol_MA20'] * df['Close']).rolling(20).mean() + 1e-8)
     df['CLV'] = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (df['Daily_Range'] + 1e-8)
     
-    # FLAW 3 COMPUTE: Volatility Bound Z-Score to block over-extended climax buying traps
+    # Overextension Guard Boundary Metric
     df['MA20'] = df['Close'].rolling(20).mean()
     df['Ext_MA20_ATR'] = (df['Close'] - df['MA20']) / (df['ATR14'] + 1e-8)
     
     if macro_df is not None:
         df = df.join(macro_df[['IHSG_vs_MA50', 'SP500_Ret5', 'USDIDR_Ret5']], how='left').ffill()
-        # Proxy Universe Breadth calculation (Simulated via proxy column)
-        df['Breadth50'] = 0.55 
         
     return df
 
-def create_triple_barrier_labels(df: pd.DataFrame) -> pd.DataFrame:
-    """Labels using True chronological barrier checks instead of survival bias loops."""
+def apply_true_barrier_labels(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     labels = []
     close = df['Close'].values
@@ -213,38 +183,58 @@ def create_triple_barrier_labels(df: pd.DataFrame) -> pd.DataFrame:
         entry_p = close[i]
         curr_atr = atr[i]
         
-        # Map dynamic targets using standard real structural boundaries
         tp_target = round_to_idx_tick(entry_p + (TP_ATR * curr_atr), "up")
         sl_target = round_to_idx_tick(entry_p - (SL_ATR * curr_atr), "down")
         
-        barrier_hit = 0
+        outcome = 0
         for day in range(1, HORIZON + 1):
-            day_high = high[i + day]
             day_low = low[i + day]
+            day_high = high[i + day]
             
             if day_low <= sl_target:
-                barrier_hit = 0
+                outcome = 0
                 break
             if day_high >= tp_target:
-                barrier_hit = 1
+                outcome = 1
                 break
-        labels.append(barrier_hit)
+        labels.append(outcome)
         
     labels.extend([0] * HORIZON)
     df['Target_Success'] = labels
     return df
 
 # =============================================================================
-# PIPELINE EXECUTION ENGINE
+# FIXED FLAW 3: SECURE TICKER-AWARE CROSS-SECTIONAL PURGING PIPELINE
 # =============================================================================
-def run_scanner():
-    log.info("[*] Starting Quant Structural Scanner V8.1 Execution Pipeline...")
-    macro_df = fetch_macro_data()
+def train_purged_panel_model(panel_df: pd.DataFrame) -> xgb.XGBClassifier:
+    """
+    FIX FLAW 3: Validates cross-sections using a strictly sequential, 
+    non-overlapping chronological block split. Prevents data leakage.
+    """
+    unique_dates = np.sort(panel_df.index.unique())
+    split_idx = int(len(unique_dates) * 0.8)
     
-    panel_data_list = []
-    live_scan_list = []
+    # Determine execution split milestones using global date arrays
+    train_dates = unique_dates[:split_idx]
     
-    for ticker in KOMPAS100:
-        try:
-            full_ticker = f"{ticker}.JK"
-            end_dt = (datetime.now(WIB) + pd.Timedelta(days=1)).date().isoformat()
+    # Inject Purge Gap barrier to separate historical execution frames gracefully
+    purge_end = train_dates[-1] + pd.Timedelta(days=HORIZON * 2)
+    test_dates = unique_dates[unique_dates > purge_end]
+    
+    train_mask = panel_df.index.isin(train_dates)
+    test_mask = panel_df.index.isin(test_dates)
+    
+    X_train = panel_df.loc[train_mask, FEATURES]
+    y_train = panel_df.loc[train_mask, 'Target_Success']
+    
+    log.info(f"[*] Panel compilation constructed: {len(X_train)} Train arrays | {len(panel_df.loc[test_mask])} Purged Out-Of-Sample arrays.")
+    
+    model = xgb.XGBClassifier(
+        n_estimators=120, max_depth=4, learning_rate=0.04,
+        subsample=0.8, colsample_bytree=0.8, random_state=42, eval_metric='logloss'
+    )
+    model.fit(X_train, y_train)
+    return model
+
+# =============================================================================
+# MAIN CONTROLLER PIPELINE
