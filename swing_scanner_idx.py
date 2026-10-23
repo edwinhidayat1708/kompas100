@@ -21,66 +21,79 @@ def get_kompas100_tickers():
     cleaned = [t.strip().upper() + ".JK" for t in tickers]
     return list(set(cleaned))
 
-def fetch_macro_and_proxy_data():
-    """Menarik data makro 7 tahun + Foreign Flow Proxy (Indeks Big 4 Banks)"""
+def fetch_macro_and_market_data():
+    """Menarik data makro dengan koreksi Time-Zone (Shift 1 hari untuk S&P 500) dan Big 4 Momentum"""
     try:
         ihsg = yf.download("^JKSE", period="7y", interval="1d", progress=False)['Close']
+        ihsg_vol = yf.download("^JKSE", period="7y", interval="1d", progress=False)['Volume']
+        
         sp500 = yf.download("^GSPC", period="7y", interval="1d", progress=False)['Close']
         idr = yf.download("USDIDR=X", period="7y", interval="1d", progress=False)['Close']
         
-        # Foreign Flow Proxy: Rata-rata pergerakan Big 4 Banks (BBCA, BBRI, BMRI, BBNI)
+        # Big 4 Banks untuk mengukur Cross-Asset Momentum Divergence
         big4 = yf.download(["BBCA.JK", "BBRI.JK", "BMRI.JK", "BBNI.JK"], period="7y", interval="1d", progress=False)['Close']
         if isinstance(big4, pd.DataFrame):
             big4_proxy = big4.mean(axis=1)
         else:
             big4_proxy = big4
             
-        for df_item in [ihsg, sp500, idr, big4_proxy]:
+        for df_item in [ihsg, ihsg_vol, sp500, idr, big4_proxy]:
             if isinstance(df_item, pd.DataFrame):
                 df_item = df_item.iloc[:, 0]
         
         macro_df = pd.DataFrame({
-            'IHSG': ihsg, 
+            'IHSG': ihsg,
+            'IHSG_Vol': ihsg_vol,
             'SP500': sp500, 
             'USDIDR': idr,
-            'Foreign_Proxy': big4_proxy
+            'Big4': big4_proxy
         }).dropna()
         
+        # KOREKSI TIME-ZONE: Shift S&P 500 sebesar 1 hari ke depan agar merefleksikan Wall Street semalam
+        macro_df['SP500_Return_5d'] = macro_df['SP500'].pct_change(5).shift(1)
+        macro_df['USDIDR_Return_5d'] = macro_df['USDIDR'].pct_change(5).shift(1)
+        
         macro_df['IHSG_Return_5d'] = macro_df['IHSG'].pct_change(5)
-        macro_df['SP500_Return_5d'] = macro_df['SP500'].pct_change(5)
-        macro_df['USDIDR_Return_5d'] = macro_df['USDIDR'].pct_change(5)
-        macro_df['Foreign_Proxy_Return_1d'] = macro_df['Foreign_Proxy'].pct_change(1) # Leading proxy aliran asing
+        macro_df['Big4_Return_5d'] = macro_df['Big4'].pct_change(5)
+        
+        # Cross-Asset Momentum Divergence: Selisih momentum Big 4 dengan IHSG keseluruhan
+        macro_df['Cross_Asset_Divergence'] = macro_df['Big4_Return_5d'] - macro_df['IHSG_Return_5d']
+        
         return macro_df
     except Exception as e:
-        print(f"[!] Gagal menarik data makro & proxy: {e}")
+        print(f"[!] Gagal menarik data makro: {e}")
         return None
 
 def engineer_features(df, macro_df):
     df = df.copy()
     
-    # 1. Tren & Jarak ke MA200 (Leading Structure)
+    # 1. Tren & Jarak ke MA200
     df['MA200'] = df['Close'].rolling(window=200).mean()
     df['Dist_MA200'] = (df['Close'] - df['MA200']) / df['MA200']
     
-    # 2. Leading Indicator: Price Range Expansion & Volume Surge (Menggantikan RSI/MACD yang Lagging)
+    # 2. Leading Indicator: Range Expansion & Volume Surge
     df['Daily_Range'] = (df['High'] - df['Low']) / df['Close']
     df['Range_MA5'] = df['Daily_Range'].rolling(window=5).mean()
-    df['Range_Expansion'] = df['Daily_Range'] / df['Range_MA5'] # Deteksi ledakan volatilitas harian
+    df['Range_Expansion'] = df['Daily_Range'] / df['Range_MA5']
     
     df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
-    df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20'] # Deteksi lonjakan volume awal
+    df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
     
     # 3. Volatilitas ATR
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
-    low_close = np.abs(df['Low'] - df['Close'].shift())
+    low_close = np.abs(df['Low'] - df['Low'].shift())
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['ATR14'] = tr.rolling(14).mean()
     df['ATR_Pct'] = df['ATR14'] / df['Close']
     
-    # Gabungkan dengan makro & foreign flow proxy
+    # Gabungkan dengan data makro & market
     if macro_df is not None:
         df = df.join(macro_df, how='left').ffill()
+        # 4. Beta Liquidity Ratio: Rasio Volume Saham dibagi Volume IHSG
+        df['Liquidity_Ratio'] = df['Volume'] / df['IHSG_Vol']
+        df['Liquidity_Ratio_MA5'] = df['Liquidity_Ratio'].rolling(window=5).mean()
+        df['Liquidity_Surge'] = df['Liquidity_Ratio'] / df['Liquidity_Ratio_MA5']
         
     return df
 
@@ -121,13 +134,13 @@ def send_telegram_message(message):
         return False
 
 def run_scanner():
-    print("[*] Mengambil data makroekonomi & Foreign Flow Proxy (Big 4 Banks)...")
-    macro_df = fetch_macro_and_proxy_data()
+    print("[*] Mengambil data makro V7 (Time-Zone Corrected + Liquidity Ratio)...")
+    macro_df = fetch_macro_and_market_data()
     
     tickers = get_kompas100_tickers()
     rekomendasi_list = []
     
-    print(f"[*] Memulai Quantitative Swing Scan V6 (Leading Indicators + Foreign Proxy) pada {len(tickers)} emiten...")
+    print(f"[*] Memulai Quantitative Swing Scan V7 pada {len(tickers)} emiten...")
 
     for ticker in tickers:
         try:
@@ -147,10 +160,11 @@ def run_scanner():
             if pd.isna(current_ma200) or current_close <= current_ma200:
                 continue  # Filter Wajib: Harga di atas MA 200
 
-            # Fitur V6: Murni Leading Price Action + Foreign Flow Proxy + Makro
+            # Fitur V7: Beta Liquidity Ratio + Cross-Asset Divergence + Time-Shifted Macro
             features = [
                 'Dist_MA200', 'Range_Expansion', 'Vol_Ratio', 'ATR_Pct', 
-                'Foreign_Proxy_Return_1d', 'IHSG_Return_5d', 'SP500_Return_5d', 'USDIDR_Return_5d'
+                'Liquidity_Surge', 'Cross_Asset_Divergence', 
+                'SP500_Return_5d', 'USDIDR_Return_5d'
             ]
             
             model_df = df.dropna(subset=features + ['Target_Success'])
@@ -189,7 +203,7 @@ def run_scanner():
         df_log = df_log.sort_values(by='Probability_%', ascending=False)
         df_log.to_csv("log_rekomendasi_swing_v3.csv", index=False)
         
-        msg = "🚨 *QUANT SWING SCANNER V6 (LEADING + FOREIGN PROXY)* 🚨\n"
+        msg = "🚨 *QUANT SWING SCANNER V7 (INSTITUTIONAL GRADE)* 🚨\n"
         msg += "Sinyal Probabilitas Sukses $\\ge 65\\%$ (Target +7% / 5 Hari):\n\n"
         for idx, row in df_log.iterrows():
             msg += f"🔹 *{row['Ticker']}*\n"
@@ -202,7 +216,7 @@ def run_scanner():
         print(f"[+] Ditemukan {len(df_log)} sinyal valid & terkirim ke Telegram.")
     else:
         print("[-] Selesai. Tidak ada emiten yang lolos kriteria probabilitas tinggi hari ini.")
-        send_telegram_message("ℹ️ *Quant Swing Scanner V6*:\nScan selesai. Tidak ada emiten KOMPAS100 yang memenuhi syarat probabilitas $\\ge 65\\%$ hari ini.")
+        send_telegram_message("ℹ️ *Quant Swing Scanner V7*:\nScan selesai. Tidak ada emiten KOMPAS100 yang memenuhi syarat probabilitas $\\ge 65\\%$ hari ini.")
         if os.path.exists("log_rekomendasi_swing_v3.csv"):
             os.remove("log_rekomendasi_swing_v3.csv")
 
