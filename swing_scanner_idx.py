@@ -786,6 +786,7 @@ def main(argv=None) -> int:
     tickers = [t + ".JK" for t in KOMPAS100]
     log.info("Mengunduh %d saham...", len(tickers))
     frames, failed = fetch_universe(tickers)
+    n_downloaded = len(frames)
     ok_ratio = len(frames) / len(tickers)
     log.info("Data OK: %d/%d | gagal: %s", len(frames), len(tickers), failed)
     if ok_ratio < MIN_UNIVERSE_OK:
@@ -860,15 +861,26 @@ def main(argv=None) -> int:
 
     lg = load_log(args.log)
     lg = update_log(lg, frames)
+    short = lambda xs: html.escape(", ".join(x.replace(".JK", "") for x in xs))
     header = [f"📊 <b>KOMPAS100 Swing Scanner V8</b> — data s/d {last_date:%d %b %Y}",
-              f"Data: {len(frames)}/{len(tickers)} saham OK"
-              + (f" | gagal: {html.escape(', '.join(failed))}" if failed else "")
-              + (f" | tertinggal: {html.escape(', '.join(stale))}" if stale else "")]
+              f"Unduh Yahoo: {n_downloaded}/{len(tickers)} berhasil"
+              + (f" | GAGAL: {short(failed)}" if failed else " | gagal: tidak ada")
+              + (f" | bar tertinggal: {short(stale)}" if stale else "")]
+    excluded = []
+    if dropped:
+        excluded.append(f"{len(dropped)} filter anti-spekulatif ({short(dropped)})")
+    if bad:
+        excluded.append(f"{len(bad)} data rusak ({short(bad)})")
+    header.append(f"Dianalisis: {len(frames)} saham"
+                  + (f" | disisihkan: {'; '.join(excluded)}" if excluded else ""))
 
     live_all = panel[panel["date"] == last_date]
     n_liq = int((live_all["ValueMA20"] >= MIN_VALUE_IDR).sum())
     header.append(f"Likuiditas: {n_liq}/{len(live_all)} saham lolos filter nilai transaksi"
                   + (f" | median anchor Rp {anchor_val / 1e9:,.0f} M/hari" if np.isfinite(anchor_val) else ""))
+    n_elig = int(live_all["Elig_Stock"].sum())
+    header.append(f"Kandidat eligible hari ini: {n_elig}/{len(live_all)} saham "
+                  f"(harga > MA200, harga ≥ Rp {MIN_PRICE}, nilai transaksi ≥ Rp {MIN_VALUE_IDR / 1e9:.0f} M)")
     if n_liq < MIN_LIQUID_WARN:
         header.append(f"⚠️ Hanya {n_liq} saham lolos filter likuiditas (< {MIN_LIQUID_WARN}) - cek satuan volume / data Yahoo.")
     header += data_notes
