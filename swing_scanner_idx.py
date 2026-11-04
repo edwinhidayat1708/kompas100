@@ -40,6 +40,7 @@ import html
 import logging
 import os
 import sys
+import time
 import warnings
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
@@ -83,11 +84,15 @@ def history_window():
     """(start, end) eksplisit. 'period=7y' bukan period resmi yfinance, jadi dipakai tanggal."""
     today = datetime.now(ZoneInfo("Asia/Jakarta")).date()
     start = (pd.Timestamp(today) - pd.DateOffset(years=YEARS_BACK)).date()
-    return start.isoformat(), (pd.Timestamp(today) + pd.Timedelta(days=1)).date().isoformat()
+    return start.isoformat(), None          # end=None -> yfinance memakai 'sekarang'; tidak ada batas atas buatan
 MIN_HISTORY = 260              # minimal jumlah bar per saham (MA200 + warm-up)
 MIN_UNIVERSE_OK = 0.70         # jika data yang berhasil < 70% universe -> run dianggap GAGAL
 WIB = ZoneInfo("Asia/Jakarta")
 MARKET_FINAL_TIME = dtime(16, 30)   # bar hari ini dianggap final setelah jam ini (WIB)
+RETRY_ATTEMPTS = 3             # jika bar hari ini belum muncul di Yahoo, coba lagi sebanyak ini
+RETRY_WAIT_SEC = 8 * 60        # jeda antar percobaan (detik)
+MAX_MISSING_BARS_OK = 2        # >= 3 hari bursa tertinggal = dianggap masalah data, bukan libur biasa
+FETCH_DIAG: dict = {}          # diagnostik pengambilan data terakhir (dipakai untuk menjelaskan penyebab data basi)
 
 # --- Label triple-barrier (semua dalam kelipatan ATR14 pada hari sinyal)
 TP_ATR = 2.5
@@ -171,8 +176,14 @@ def _tidy_ohlcv(df):
     df.index = clean_index(df.index)
     df = df[~df.index.duplicated(keep="last")].sort_index()
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
-    df = df[df["Volume"] > 0]            # buang hari tanpa transaksi / suspensi
+    if len(df) == 0:
+        return None
+    raw_last = df.index[-1]              # bar terakhir MENTAH (sebelum filter volume) - untuk diagnostik
+    raw_tail = "; ".join(f"{i:%d %b} C={r['Close']:.0f} V={r['Volume']:.0f}" for i, r in df.tail(3).iterrows())
+    df = df[df["Volume"] > 0]            # buang hari tanpa transaksi / suspensi / volume belum terisi
     df = df[df["High"] >= df["Low"]]
+    df.attrs["raw_last"] = raw_last
+    df.attrs["raw_tail"] = raw_tail
     return df
 
 
@@ -187,7 +198,7 @@ def drop_partial_bar(obj):
 
 
 def fetch_universe(tickers):
-    out, failed = {}, []
+    out, failed, raw_last = {}, [], {}
     raw = None
     try:
         start, end = history_window()
@@ -209,11 +220,57 @@ def fetch_universe(tickers):
                                                      interval="1d", auto_adjust=ADJUST_DIVIDENDS))
             except Exception as e:              # noqa: BLE001
                 log.warning("Retry %s gagal: %s", t, e)
+        if df is not None:
+            if df.attrs.get("raw_last") is not None:
+                raw_last[t] = df.attrs["raw_last"]
+            if t == "BBCA.JK":
+                FETCH_DIAG["raw_tail"] = df.attrs.get("raw_tail")
         if df is None or len(df) < MIN_HISTORY:
             failed.append(t)
             continue
         out[t] = drop_partial_bar(df)
+    FETCH_DIAG["raw_last"] = raw_last
     return out, failed
+
+
+def expected_trading_day(now=None) -> pd.Timestamp:
+    """Hari bursa terakhir yang SEHARUSNYA sudah punya bar final (tanpa kalender libur):
+    hari ini jika hari kerja & lewat 16:30 WIB, selain itu hari kerja sebelumnya."""
+    now = now or datetime.now(WIB)
+    d = now.date()
+    if d.weekday() >= 5 or now.time() < MARKET_FINAL_TIME:
+        d = d - pd.Timedelta(days=1)
+    while d.weekday() >= 5:
+        d = d - pd.Timedelta(days=1)
+    return pd.Timestamp(d)
+
+
+def diagnose_freshness(global_last, expected, ihsg, diag):
+    """Return (status, penjelasan). status: 'fresh' | 'holiday_or_lag' | 'problem'."""
+    if global_last >= expected:
+        return "fresh", ""
+    ihsg_last = ihsg.index[-1] if ihsg is not None and len(ihsg) else None
+    raw_last = [d for d in (diag.get("raw_last") or {}).values() if d is not None]
+    raw_max = max(raw_last) if raw_last else None
+    missing = int(np.busday_count((global_last + pd.Timedelta(days=1)).date(),
+                                  (expected + pd.Timedelta(days=1)).date()))
+    lines = [f"Seharusnya bar terakhir: {expected:%d %b %Y}",
+             f"Bar saham terakhir (dipakai): {global_last:%d %b %Y} ({missing} hari bursa tertinggal)",
+             f"Bar IHSG terakhir: {ihsg_last:%d %b %Y}" if ihsg_last is not None else "Bar IHSG: n/a",
+             f"Bar mentah Yahoo sebelum filter volume: {raw_max:%d %b %Y}" if raw_max is not None else "Bar mentah: n/a"]
+    if diag.get("raw_tail"):
+        lines.append(f"Contoh BBCA mentah: {diag['raw_tail']}")
+    if raw_max is not None and raw_max > global_last:
+        lines.append("Penyebab: Yahoo mengirim bar terbaru tetapi volumenya kosong/0, sehingga dibuang filter volume.")
+        return "problem", "\n".join(lines)
+    if ihsg_last is not None and ihsg_last >= expected:
+        lines.append("Penyebab: IHSG sudah punya bar terbaru, data saham Yahoo belum -> data saham tertinggal.")
+        return "problem", "\n".join(lines)
+    if missing > MAX_MISSING_BARS_OK:
+        lines.append(f"Penyebab: {missing} hari bursa tertinggal sekaligus - terlalu panjang untuk libur biasa.")
+        return "problem", "\n".join(lines)
+    lines.append("Kemungkinan: libur bursa/cuti bersama, atau Yahoo belum memperbarui. Cek kalender BEI.")
+    return "holiday_or_lag", "\n".join(lines)
 
 
 def fetch_close(symbol: str):
@@ -785,7 +842,16 @@ def main(argv=None) -> int:
     # ---------------- 1. DATA ----------------
     tickers = [t + ".JK" for t in KOMPAS100]
     log.info("Mengunduh %d saham...", len(tickers))
+    expected = expected_trading_day()
     frames, failed = fetch_universe(tickers)
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        gl = max((df.index[-1] for df in frames.values()), default=None)
+        if args.force or (gl is not None and gl >= expected):
+            break
+        log.warning("Data belum segar: bar terakhir %s < diharapkan %s. Tunggu %d detik, coba lagi (%d/%d).",
+                    gl.date() if gl is not None else None, expected.date(), RETRY_WAIT_SEC, attempt, RETRY_ATTEMPTS)
+        time.sleep(RETRY_WAIT_SEC)
+        frames, failed = fetch_universe(tickers)
     n_downloaded = len(frames)
     ok_ratio = len(frames) / len(tickers)
     log.info("Data OK: %d/%d | gagal: %s", len(frames), len(tickers), failed)
@@ -816,10 +882,16 @@ def main(argv=None) -> int:
     log.info("Fetch %s WIB | rentang data: %s s/d %s (median awal %s, %d saham dengan histori >= 6,5 th)",
              datetime.now(WIB).strftime("%Y-%m-%d %H:%M"), first_dates.min().date(), global_last.date(),
              first_dates.median().date(), int((first_dates <= global_last - pd.DateOffset(years=6, months=6)).sum()))
-    today_wib = datetime.now(WIB).date()
-    if datetime.now(WIB).weekday() < 5 and global_last.date() < today_wib and not args.force:
-        msg = (f"ℹ️ <b>Scanner V8</b>: bursa libur / data Yahoo belum diperbarui "
-               f"(bar terakhir {global_last:%d %b %Y}, hari ini {today_wib:%d %b %Y}). Tidak ada sinyal dikirim.")
+    status, why = diagnose_freshness(global_last, expected, ihsg, FETCH_DIAG)
+    if status != "fresh" and not args.force:
+        run_t = datetime.now(WIB).strftime("%d %b %Y %H:%M")
+        if status == "problem":
+            msg = (f"❌ <b>Scanner V8: DATA YAHOO TIDAK SEGAR</b> (run {run_t} WIB)\n{html.escape(why)}\n"
+                   f"Tidak ada sinyal dikirim. Ini masalah DATA, bukan 'tidak ada sinyal'.")
+            send_telegram(msg, args.dry_run)
+            return 1
+        msg = (f"ℹ️ <b>Scanner V8</b>: data belum diperbarui / kemungkinan bursa libur (run {run_t} WIB)\n"
+               f"{html.escape(why)}\nTidak ada sinyal dikirim.")
         send_telegram(msg, args.dry_run)
         return 0
     stale = [t for t, df in frames.items() if df.index[-1] < global_last]
