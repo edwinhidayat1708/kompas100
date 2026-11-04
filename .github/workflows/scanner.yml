@@ -32,7 +32,7 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: swing_scanner_idx.py
+        run: python swing_scanner_idx.py
 
       - name: Commit forward-test log
         if: always()
